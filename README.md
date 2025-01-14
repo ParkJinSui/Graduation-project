@@ -1,6 +1,7 @@
-# import pyrealsense2 as rs
-# import numpy as np
-# import cv2
+
+import pyrealsense2 as rs
+import numpy as np
+import cv2
 
 위 라이브러리를 import 시켜야 한다.
 
