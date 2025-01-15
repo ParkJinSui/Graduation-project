@@ -2,6 +2,7 @@
 visual studio code에서 WSL 환경은 외부 디바이스를 받지 못하는 환경이기 때문에 직접 우분투 터미널에서 진행하려 함.
 그러나 이 환경에서도 외부 디바이스를 받지 못하여 새로 라이브러리를 깔아야 됨. 씨@빨
 이번주 주말까지만 pyopenpose로 해보고 안되면 진수가 하는 mediapipe로 갈아타려 함
+추가로 라즈베리파이랑 카메라랑 같이 구동시키려면 8핀-usb 연결선 필요함.
 
 박진수 :
 ananconda 환경에서 mediapipe를 실행하려고 하는데, ImportError: DLL load failed while importing _framework_bindings: DLL 초기화 루틴을 실행할 수 없습니다. 라는
