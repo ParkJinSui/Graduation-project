@@ -4,3 +4,6 @@ visual studio code에서 WSL 환경은 외부 디바이스를 받지 못하는 �
 이번주 주말까지만 pyopenpose로 해보고 안되면 진수가 하는 mediapipe로 갈아타려 함
 
 박진수 :
+ananconda 환경에서 mediapipe를 실행하려고 하는데, ImportError: DLL load failed while importing _framework_bindings: DLL 초기화 루틴을 실행할 수 없습니다. 라는
+오류가 떠서 결국에 계속해서 여기서 계속 막힘. 여러가지 찾아봤는데, Mediapipe와 python간 버전이 서로 맞지 않아서 발생한 오류지 않을까함..
+두번째는 라즈베리파이4 구동해서 하려고 해봤는데 키보드를 깜빡함. 담엔 키보드 가져와야함. 
