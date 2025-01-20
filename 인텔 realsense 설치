@@ -1,0 +1,8 @@
+Librealsense2 설치 방법
+https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md
+
+pyrealsense 설치
+pip install pyrealsense2
+
+
+
