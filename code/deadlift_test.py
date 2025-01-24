@@ -118,3 +118,5 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
 
 cap.release()
 cv2.destroyAllWindows()
+
+#데드리프트에 맞는 각도 조절 필요!
