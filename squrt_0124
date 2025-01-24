@@ -78,18 +78,18 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
 
             # Squat logic
             if ready:
-                if hip_angle < 90:
+                if hip_angle < 90 and knee_angle < 90:
                     if stage != 'down':
                         stage = 'down'
                         correct = True
                         
                 if stage == 'down' :
-                    if 80 < hip_angle < 90 :
+                    if 80 < hip_angle < 90 and 70 < knee_angle < 90 :
                         feedback = "Good posture!"
                         correct = True
-                    elif 90 < hip_angle :
+                    elif 90 < hip_angle or 90 < knee_angle :
                         feedback = "Incorrect posture! Down your hip"
-                    elif 80 > hip_angle :
+                    elif 80 > hip_angle or 70 > knee_angle :
                         feedback = "Incorrect posture! Up your hip"
                     
                     
