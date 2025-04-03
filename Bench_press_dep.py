@@ -1,0 +1,106 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyrealsense2 as rs
+
+# Mediapipe Pose setup
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+mp_drawing = mp.solutions.drawing_utils
+
+# Initialize repetition counter
+counter = 0
+stage = None  # 'down' or 'up'
+
+# Function to calculate the angle
+def calculate_angle(a, b, c):
+    a = np.array(a)  # Shoulder
+    b = np.array(b)  # Elbow
+    c = np.array(c)  # Wrist
+
+    radians = np.arccos(
+        np.dot(a - b, c - b) / (np.linalg.norm(a - b) * np.linalg.norm(c - b))
+    )
+    angle = np.degrees(radians)
+    return angle
+
+# Configure RealSense pipeline
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+
+# Start streaming
+pipeline.start(config)
+
+try:
+    while True:
+        frames = pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        depth_frame = frames.get_depth_frame()
+        if not color_frame or not depth_frame:
+            continue
+
+        # Convert image to numpy array
+        image = np.asanyarray(color_frame.get_data())
+        depth_image = np.asanyarray(depth_frame.get_data())
+        image = cv2.flip(image, 1)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = pose.process(image_rgb)
+
+        try:
+            landmarks = results.pose_landmarks.landmark
+
+            # Function to get 3D coordinates
+            def get_3d_coords(landmark):
+                x = int(landmark.x * image.shape[1])
+                y = int(landmark.y * image.shape[0])
+                depth = int(depth_frame.get_distance(x, y) * 1000)  # Convert to mm and round
+                return [x, y, f'{depth} mm']
+
+            # Draw all skeleton points with XYZ coordinates
+            for idx, landmark in enumerate(landmarks):
+                coords = get_3d_coords(landmark)
+                pos = (coords[0], coords[1])
+                cv2.putText(image, f'{idx}: {coords}', pos, cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1)
+
+            # Left joint coordinates
+            shoulder = get_3d_coords(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value])
+            elbow = get_3d_coords(landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value])
+            wrist = get_3d_coords(landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value])
+
+            # Calculate arm angle
+            angle = calculate_angle(shoulder[:2], elbow[:2], wrist[:2])
+
+            # Determine repetition count
+            if angle > 160:
+                stage = "up"
+            if angle < 60 and stage == "up":
+                stage = "down"
+                counter += 1
+
+            # Draw the angle and coordinates on the image
+            elbow_coords = (elbow[0], elbow[1])
+            cv2.putText(image, f'Angle: {int(angle)}', 
+                        elbow_coords, 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        except:
+            pass
+
+        # Draw Mediapipe landmarks
+        mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+
+        # Display repetition count and stage
+        cv2.putText(image, f'Reps: {counter}', 
+                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(image, f'Stage: {stage}', 
+                    (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        cv2.imshow('Bench Press Tracker with RealSense', image)
+
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+
+finally:
+    pipeline.stop()
+    cv2.destroyAllWindows()
