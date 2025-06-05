@@ -1,0 +1,195 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyrealsense2 as rs
+import time
+
+# ------------------- 초기 설정 -------------------
+mp_pose    = mp.solutions.pose
+pose       = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+mp_drawing = mp.solutions.drawing_utils
+
+counter       = 0      # 벤치프레스 횟수
+stage         = None   # "up" 또는 "down"
+feedback_time = None   # 마지막 피드백 타이밍 (폼 체크용)
+FEEDBACK_INTERVAL = 3  # 3초마다 폼 체크 메시지 갱신
+
+# RealSense 카메라 설정
+pipeline = rs.pipeline()
+config   = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+profile  = pipeline.start(config)
+
+# 깊이-카메라 내부 파라미터 가져오기
+depth_stream = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+intrinsics   = depth_stream.get_intrinsics()
+
+# ------------------- 보조 함수 -------------------
+def calculate_angle_3d(a, b, c):
+    """
+    3D 점 A-B-C 사이의 각도(∠ABC) 계산
+    """
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    ba, bc  = a - b, c - b
+    cos_v   = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    cos_v   = np.clip(cos_v, -1.0, 1.0)
+    return np.degrees(np.arccos(cos_v))
+
+def get_3d_coord(landmark, depth_frame, intrinsics, img_w, img_h):
+    """
+    Mediapipe 랜드마크와 깊이 프레임을 이용해 3D 좌표(x, y, z)를 반환.
+    화면 좌표(landmark.x, landmark.y)를 RealSense 깊이 이미지 픽셀 좌표로 변환 후
+    rs2_deproject_pixel_to_point를 통해 실세계 좌표(m 단위)로 계산.
+    """
+    x_px = int(landmark.x * img_w)
+    y_px = int(landmark.y * img_h)
+    # Mediapipe 출력은 flip된 이미지를 기준으로 하지 않으므로, depth 프레임의 x 좌표를 뒤집어야 함
+    # (실제 카메라와 Mediapipe 좌표계가 반전되기 때문)
+    x_rs = img_w - 1 - x_px
+    y_rs = np.clip(y_px, 0, img_h - 1)
+    x_rs = np.clip(x_rs, 0, img_w - 1)
+
+    depth_m = depth_frame.get_distance(x_rs, y_rs)
+    if depth_m <= 0:
+        return None
+
+    # RealSense 내장 함수를 통해 픽셀→실세계 좌표 변환
+    point_3d = rs.rs2_deproject_pixel_to_point(intrinsics, [x_rs, y_rs], depth_m)
+    return point_3d  # [X(m), Y(m), Z(m)]
+
+def update_counter_and_stage(elbow_angle, stage, counter):
+    """
+    벤치프레스에서 팔꿈치 각도(어깨-팔꿈치-손목)를 기준으로 up/down 판정 및 카운터 업데이트.
+    - 팔꿈치 각도 > 160°: 팔폄(업) 상태
+    - 팔꿈치 각도 < 90° : 팔굽힘(다운) 상태
+    """
+    up_threshold   = 160
+    down_threshold = 90
+
+    if elbow_angle > up_threshold:
+        if stage == "down":
+            counter += 1
+        stage = "up"
+    elif elbow_angle < down_threshold:
+        stage = "down"
+    # 중간 구간(업/다운 사이)은 stage 유지
+    return stage, counter
+
+def draw_form_feedback(image, x, y, label, ok):
+    """
+    폼 체크용 체크박스를 그려줌.
+    label: 체크박스 옆에 표시될 문구
+    ok: True/False. True이면 체크 표시, False이면 빈 박스.
+    """
+    box_size = 20
+    cv2.rectangle(image, (x, y), (x + box_size, y + box_size), (255, 255, 255), 2)
+    if ok:
+        # 체크 표시 (V자)
+        cv2.line(image, (x + 4, y + box_size // 2), (x + box_size // 2, y + box_size - 4), (0, 255, 0), 2)
+        cv2.line(image, (x + box_size // 2, y + box_size - 4), (x + box_size - 4, y + 4), (0, 255, 0), 2)
+    cv2.putText(image, label, (x + box_size + 5, y + box_size - 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+# ------------------- 메인 루프 -------------------
+try:
+    while True:
+        frames      = pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        depth_frame = frames.get_depth_frame()
+        if not color_frame or not depth_frame:
+            continue
+
+        image      = np.asanyarray(color_frame.get_data())
+        image      = cv2.flip(image, 1)  # 좌우 뒤집기
+        img_h, img_w = image.shape[:2]
+        image_rgb  = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results    = pose.process(image_rgb)
+
+        # 화면 상단에 횟수와 스테이지 표시
+        cv2.putText(image, f'Reps: {counter}', (20, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(image, f'Stage: {stage}', (20, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        # 일정 간격마다 폼 체크를 위한 시간 갱신
+        now = time.time()
+        if feedback_time is None:
+            feedback_time = now
+
+        if results.pose_landmarks:
+            lm = results.pose_landmarks.landmark
+
+            # 3D 좌표 획득 (어깨, 팔꿈치, 손목)
+            shoulder = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value],
+                                    depth_frame, intrinsics, img_w, img_h)
+            elbow    = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_ELBOW.value],
+                                    depth_frame, intrinsics, img_w, img_h)
+            wrist    = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_WRIST.value],
+                                    depth_frame, intrinsics, img_w, img_h)
+
+            # 벤치프레스는 양손을 동시에 사용하므로 오른쪽도 같이 체크하는 것이 좋음
+            shoulder_r = get_3d_coord(lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value],
+                                    depth_frame, intrinsics, img_w, img_h)
+            elbow_r    = get_3d_coord(lm[mp_pose.PoseLandmark.RIGHT_ELBOW.value],
+                                    depth_frame, intrinsics, img_w, img_h)
+            wrist_r    = get_3d_coord(lm[mp_pose.PoseLandmark.RIGHT_WRIST.value],
+                                    depth_frame, intrinsics, img_w, img_h)
+
+            if None not in (shoulder, elbow, wrist, shoulder_r, elbow_r, wrist_r):
+                # 팔꿈치 각도 계산 (왼쪽/오른쪽 각각)
+                elbow_angle_l = calculate_angle_3d(shoulder, elbow, wrist)
+                elbow_angle_r = calculate_angle_3d(shoulder_r, elbow_r, wrist_r)
+                # 대표값으로 둘의 평균 사용
+                elbow_angle = (elbow_angle_l + elbow_angle_r) / 2
+
+                # 카운터 & 스테이지 업데이트
+                stage, counter = update_counter_and_stage(elbow_angle, stage, counter)
+
+                # 폼 체크 지표 계산 (3초마다 갱신)
+                if now - feedback_time >= FEEDBACK_INTERVAL:
+                    # 1) 손목 중립: 어깨-팔꿈치-손목 선이 거의 일직선 상태면 OK (팔꿈치 각도 근사 180°)
+                    cond_wrist = (abs(elbow_angle_l - 180) < 20 and abs(elbow_angle_r - 180) < 20)
+
+                    # 2) 어깨 높이 균일: 왼쪽/오른쪽 어깨 Z축 깊이 차이가 작으면 OK
+                    z_diff_shoulders = abs(shoulder[2] - shoulder_r[2])  # m 단위
+                    cond_shoulder_level = (z_diff_shoulders < 0.05)  # 5cm 이내면 수평
+
+                    # 3) 등판 밀착: 엉덩이, 어깨, 무릎 삼각 좌표에서 등판이 벤치에 붙어있어야 함
+                    #    hip_point: 엉덩이 좌표. Mediapipe에서 엉덩이는 LEFT_HIP, RIGHT_HIP 평균 사용
+                    hip_l = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_HIP.value],
+                                        depth_frame, intrinsics, img_w, img_h)
+                    hip_r = get_3d_coord(lm[mp_pose.PoseLandmark.RIGHT_HIP.value],
+                                        depth_frame, intrinsics, img_w, img_h)
+                    if None not in (hip_l, hip_r):
+                        hip_center = [(hip_l[i] + hip_r[i]) / 2 for i in range(3)]
+                        # 어깨와 엉덩이 Z축 차이가 작으면 등판이 벤치와 평탄
+                        z_diff_back = abs((shoulder[2] + shoulder_r[2]) / 2 - hip_center[2])
+                        cond_back_flat = (z_diff_back < 0.07)  # 7cm 이내면 OK
+                    else:
+                        cond_back_flat = False
+
+                    # 체크박스 그리기
+                    fb_x, fb_y, dy = 500, 50, 40
+                    draw_form_feedback(image, fb_x,     fb_y + dy * 0, 'Wrist Neutral',    cond_wrist)
+                    draw_form_feedback(image, fb_x,     fb_y + dy * 1, 'Shoulder Level',   cond_shoulder_level)
+                    draw_form_feedback(image, fb_x,     fb_y + dy * 2, 'Back on Bench',    cond_back_flat)
+
+                    feedback_time = now
+
+                # 팔꿈치 각도 실시간 표시
+                cv2.putText(image, f'Elbow Angle: {int(elbow_angle)}', (20, 110),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+            mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+        else:
+            cv2.putText(image, 'Detecting pose...', (20, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 255), 2)
+
+        cv2.imshow('Bench Press Tracker', image)
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+
+finally:
+    pipeline.stop()
+    cv2.destroyAllWindows()
