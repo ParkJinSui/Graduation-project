@@ -1,0 +1,159 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyrealsense2 as rs
+
+# Mediapipe 초기화
+mp_pose    = mp.solutions.pose
+pose       = mp_pose.Pose(min_detection_confidence=0.5,
+                         min_tracking_confidence=0.5)
+mp_drawing = mp.solutions.drawing_utils
+
+# RealSense 파이프라인 설정 및 시작
+pipeline = rs.pipeline()
+config   = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+profile  = pipeline.start(config)
+
+# 깊이-카메라 내부 파라미터
+depth_stream = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+intrinsics   = depth_stream.get_intrinsics()
+
+# 반복 변수
+counter        = 0     # 데드리프트 횟수
+stage          = None  # "up" 또는 "down"
+feedback_given = False
+
+# ── 함수 정의 ────────────────────────────────────────────
+
+# 3D 점 B에서 ∠ABC 계산
+def calculate_angle_3d(a, b, c):
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    ba, bc  = a - b, c - b
+    cos_v   = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    cos_v   = np.clip(cos_v, -1.0, 1.0)
+    return np.degrees(np.arccos(cos_v))
+
+# 두 벡터 사이 각도 계산 (spine vs vertical)
+def calculate_vector_angle(v1, v2):
+    v1, v2 = np.array(v1), np.array(v2)
+    cos_v  = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+    cos_v  = np.clip(cos_v, -1.0, 1.0)
+    return np.degrees(np.arccos(cos_v))
+
+# Mediapipe 랜드마크 + RealSense 깊이 → 3D 좌표
+def get_3d_coord(lm, depth_frame, intrinsics, w, h):
+    x = int(lm.x * w)
+    y = int(lm.y * h)
+    xf = w - 1 - x
+    xf = min(max(xf, 0), w-1)
+    y  = min(max(y,  0), h-1)
+    depth_m = depth_frame.get_distance(xf, y)
+    if depth_m <= 0:
+        return None
+    return rs.rs2_deproject_pixel_to_point(intrinsics, [xf, y], depth_m)
+
+# ── 스테이지 & 카운터 업데이트 ────────────────────────────
+# 힙 힌지 각도만으로 down/up 판정
+def update_counter_and_stage(hinge_angle, stage, counter):
+    down_th = 120   # 힙 힌지 120° 미만 → down
+    up_th   = 150   # 힙 힌지 150° 초과 → up
+
+    if hinge_angle > up_th:
+        if stage == "down":
+            counter += 1
+        stage = "up"
+    elif hinge_angle < down_th:
+        stage = "down"
+    # else: 중간 단계 유지
+    return stage, counter
+
+# 체크박스 그리기
+def draw_checkbox(img, x, y, label, ok):
+    s = 20
+    cv2.rectangle(img, (x,y), (x+s,y+s), (255,255,255), 2)
+    if ok:
+        cv2.line(img, (x+4, y+s//2), (x+s//2, y+s-4), (0,255,0), 2)
+        cv2.line(img, (x+s//2, y+s-4), (x+s-4, y+4), (0,255,0), 2)
+    cv2.putText(img, label, (x+s+5, y+s-2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+# ── 메인 루프 ────────────────────────────────────────────
+try:
+    while True:
+        frames      = pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        depth_frame = frames.get_depth_frame()
+        if not color_frame or not depth_frame:
+            continue
+
+        img    = np.asanyarray(color_frame.get_data())
+        h, w   = img.shape[:2]
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        res     = pose.process(img_rgb)
+
+        # 상단 정보
+        cv2.putText(img, f'Reps: {counter}', (20,30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+        cv2.putText(img, f'Stage: {stage}', (20,70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+
+        if res.pose_landmarks:
+            lm = res.pose_landmarks.landmark
+
+            # 3D 좌표
+            sh = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value],
+                              depth_frame, intrinsics, w, h)
+            hp = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_HIP.value],
+                              depth_frame, intrinsics, w, h)
+            kn = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_KNEE.value],
+                              depth_frame, intrinsics, w, h)
+            el = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_ELBOW.value],
+                              depth_frame, intrinsics, w, h)
+            an = get_3d_coord(lm[mp_pose.PoseLandmark.LEFT_ANKLE.value],
+                              depth_frame, intrinsics, w, h)
+
+            if None not in (sh, hp, kn, el, an):
+                # hinge_angle (hip 힌지)
+                hinge_angle = calculate_angle_3d(sh, hp, kn)
+                stage, counter = update_counter_and_stage(hinge_angle, stage, counter)
+
+                # 체크박스용 각도 계산
+                # 1) Neutral Spine: hip→shoulder vs vertical
+                spine_vec     = np.array(sh) - np.array(hp)
+                vertical_axis = np.array([0, -1, 0])
+                spine_angle   = calculate_vector_angle(spine_vec, vertical_axis)
+                cond_spine    = (spine_angle <= 20)
+
+                # 2) Arm Stability
+                arm_angle  = calculate_angle_3d(el, sh, hp)
+                cond_arm   = (arm_angle >= 170)
+
+                # 3) Knee Stability
+                knee_angle = calculate_angle_3d(hp, kn, an)
+                cond_knee  = (knee_angle >= 160)
+
+                # 4) Hip Drive (up 단계에서만)
+                cond_hip   = (stage == "up" and hinge_angle >= 160)
+
+                # 체크박스 그리기
+                bx, by, dy = 500,  50, 40
+                draw_checkbox(img, bx,     by+dy*0, 'Neutral Spine',  cond_spine)
+                draw_checkbox(img, bx,     by+dy*1, 'Arm Stability',  cond_arm)
+                draw_checkbox(img, bx,     by+dy*2, 'Knee Stability', cond_knee)
+                draw_checkbox(img, bx,     by+dy*3, 'Hip Drive',      cond_hip)
+
+            mp_drawing.draw_landmarks(img, res.pose_landmarks,
+                                      mp_pose.POSE_CONNECTIONS)
+        else:
+            cv2.putText(img, 'Detecting pose...', (20,30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100,100,255), 2)
+
+        cv2.imshow('Deadlift Tracker', img)
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+
+finally:
+    pipeline.stop()
+    cv2.destroyAllWindows()
