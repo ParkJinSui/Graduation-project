@@ -1,0 +1,152 @@
+# ▼ 스쿼트 최종 수정 코드 (pt 모델 적용)
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyrealsense2 as rs
+import time
+from ultralytics import YOLO
+
+# ------------------- 초기 설정 -------------------
+yolo_model = YOLO('C:/Users/SAMSUNG/Desktop/jol_model/best_model.pt')  # 경로 바꾸면 됨.
+
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+mp_drawing = mp.solutions.drawing_utils
+
+counter = 0
+stage = None
+stable_start_time = None
+exercise_started = False
+STABLE_DURATION = 3
+no_pose_start_time = None
+progress = 0.0
+
+# RealSense 카메라 설정
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+pipeline.start(config)
+
+# ------------------- 보조 함수 -------------------
+def calculate_angle_3d(a, b, c):
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    ba, bc = a - b, c - b
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
+    angle = np.degrees(np.arccos(cosine_angle))
+    return angle
+
+def get_depth(x, y, depth_frame):
+    x = np.clip(int(x), 0, 639)
+    y = np.clip(int(y), 0, 479)
+    return depth_frame.get_distance(x, y) * 1000  # mm
+
+def get_combined_3d(yolo_kpt, mp_lmk, depth_frame):
+    x_yolo, y_yolo = yolo_kpt
+    x_mp = mp_lmk.x * 640
+    y_mp = mp_lmk.y * 480
+    z_mp = mp_lmk.z * 1000
+
+    z_yolo = get_depth(x_yolo, y_yolo, depth_frame)
+    z_combined = z_yolo if z_yolo > 0 else z_mp
+
+    x_final = (x_yolo + x_mp) / 2
+    y_final = (y_yolo + y_mp) / 2
+    return [x_final, y_final, z_combined]
+
+def get_progress(hip_angle, knee_angle):
+    progress = 1.0
+    if hip_angle > 110:
+        progress -= 0.33
+    if knee_angle > 130:
+        progress -= 0.33
+    if knee_angle < 90:
+        progress -= 0.33
+    return np.clip(progress, 0.0, 1.0)
+
+def update_counter_and_stage(hip_angle, knee_angle, stage, counter):
+    global progress
+    hip_up_threshold, knee_up_threshold = 160, 160
+    hip_down_threshold, knee_down_threshold = 100, 120
+
+    if hip_angle > hip_up_threshold and knee_angle > knee_up_threshold:
+        if stage == "down":
+            counter += 1
+        stage = "up"
+        progress = 0.0
+    elif hip_angle < hip_down_threshold and knee_angle < knee_down_threshold:
+        if stage == "up":
+            stage = "down"
+        progress = get_progress(hip_angle, knee_angle)
+    else:
+        progress = max(progress - 0.05, 0.0)
+    return stage, counter
+
+# ------------------- 메인 루프 -------------------
+try:
+    while True:
+        frames = pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        depth_frame = frames.get_depth_frame()
+        if not color_frame or not depth_frame:
+            continue
+
+        image = np.asanyarray(color_frame.get_data())
+        image = cv2.flip(image, 1)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Mediapipe 추론
+        results_mp = pose.process(image_rgb)
+
+        # YOLO 추론
+        results_yolo = yolo_model(image, verbose=False)[0]
+
+        if results_mp.pose_landmarks and results_yolo.keypoints is not None:
+            kpts = results_yolo.keypoints.xy[0].cpu().numpy()  # (20, 2)
+            lmks = results_mp.pose_landmarks.landmark
+
+            # 안전 범위 내 인덱스만 사용 (YOLO 모델이 20개의 keypoint만 예측하므로 범위 확인 필요)
+            if len(kpts) >= 16:  # 인덱스 0~15까지는 안전하게 사용 가능
+                # 가정된 인덱스: 5=shoulder, 11=hip, 13=knee, 15=ankle
+                shoulder = get_combined_3d(kpts[5], lmks[mp_pose.PoseLandmark.LEFT_SHOULDER.value], depth_frame)
+                hip      = get_combined_3d(kpts[11], lmks[mp_pose.PoseLandmark.LEFT_HIP.value], depth_frame)
+                knee     = get_combined_3d(kpts[13], lmks[mp_pose.PoseLandmark.LEFT_KNEE.value], depth_frame)
+                ankle    = get_combined_3d(kpts[15], lmks[mp_pose.PoseLandmark.LEFT_ANKLE.value], depth_frame)
+
+                hip_angle = calculate_angle_3d(shoulder, hip, knee)
+                knee_angle = calculate_angle_3d(hip, knee, ankle)
+
+                if stable_start_time is None:
+                    stable_start_time = time.time()
+                exercise_started = time.time() - stable_start_time >= STABLE_DURATION
+
+                if exercise_started:
+                    stage, counter = update_counter_and_stage(hip_angle, knee_angle, stage, counter)
+
+                cv2.putText(image, f'Hip: {int(hip_angle)}', (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(image, f'Knee: {int(knee_angle)}', (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(image, f'Reps: {counter}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(image, f'Stage: {stage}', (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+                # 진행도 바
+                bar_x, bar_y = 550, 100
+                bar_height, bar_width = 300, 30
+                filled = int(progress * bar_height)
+                cv2.rectangle(image, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (255, 255, 255), 2)
+                cv2.rectangle(image, (bar_x, bar_y + bar_height - filled), (bar_x + bar_width, bar_y + bar_height), (0, 255, 0), -1)
+                cv2.putText(image, f'{int(progress * 100)}%', (bar_x - 10, bar_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                mp_drawing.draw_landmarks(image, results_mp.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+
+        else:
+            stable_start_time = None
+            cv2.putText(image, 'Detecting skeleton...', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 255), 2)
+
+        cv2.imshow('Squat Tracker (YOLO + Mediapipe)', image)
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+
+finally:
+    pipeline.stop()
+    cv2.destroyAllWindows()
