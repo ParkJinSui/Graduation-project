@@ -5,20 +5,20 @@ YOLOv8을 활용해 스쿼트·벤치프레스·데드리프트 자세를 분석
 
 🔧 Tech Stack
 
-Raspberry Pi (Linux)
+-Raspberry Pi (Linux)
 
-Python, OpenCV
+-Python, OpenCV
 
-YOLOv8 Pose
+-YOLOv8 Pose
 
-PID Control
+-PID Control
 
-Servo Motor Control
+-Servo Motor Control
 
 🚀 Key Points
 
-실시간 포즈 추정 및 각도 기반 자세 분석 알고리즘 구현
+-실시간 포즈 추정 및 각도 기반 자세 분석 알고리즘 구현
 
-PID 제어 기반 카메라 추종 시스템 설계
+-PID 제어 기반 카메라 추종 시스템 설계
 
-영상 처리와 모터 제어를 통합한 임베디드 시스템 구현
+-영상 처리와 모터 제어를 통합한 임베디드 시스템 구현
